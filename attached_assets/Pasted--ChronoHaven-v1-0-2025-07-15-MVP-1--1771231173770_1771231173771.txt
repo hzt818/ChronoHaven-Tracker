@@ -1,0 +1,986 @@
+栖时岛（ChronoHaven）软件开发全流程方案
+
+版本历史
+
+版本 日期 作者 变更描述
+v1.0 2025-07-15 架构师 初始版本，涵盖MVP及后续迭代设计
+
+---
+
+1. 技术架构设计
+
+1.1 前端（移动端）技术栈
+
+选择：Flutter 3.x
+理由：
+
+· 跨平台一致性：一套代码同时编译iOS和Android，确保双端体验一致，降低维护成本。
+· 高性能：自研Skia渲染引擎，可承载岛屿建造等复杂动画和游戏化交互。
+· MD3原生支持：Flutter内置Material Design 3组件库，可快速实现深绿/暖金主题定制。
+· 热重载：提升开发效率，适合快速迭代。
+· 生态成熟：丰富的第三方包（如计时器、图表、动画）可直接集成。
+
+备用方案：React Native + Reanimated，但动画性能稍弱，故选择Flutter。
+
+1.2 后端技术栈
+
+选择：Serverless架构（腾讯云SCF / AWS Lambda）
+理由：
+
+· 成本控制：按需付费，适合初创项目避免资源闲置。
+· 自动扩缩容：应对用户增长时无需手动管理服务器。
+· 开发效率：聚焦业务逻辑，无需运维基础设施。
+· API网关：统一管理RESTful接口，支持多环境。
+· 云函数：Node.js 18 LTS（便于前端复用TypeScript类型）。
+
+数据库：
+
+· 主库：MongoDB Atlas（文档型NoSQL）
+  · 用户、岛屿、建筑、任务等数据结构多变，MongoDB的灵活Schema可快速适应迭代。
+  · 支持地理位置查询（未来部落功能）。
+· 关系型辅助：PostgreSQL（可选）
+  · 用于公益兑换记录等需要强事务一致性的场景，但MVP阶段可先用MongoDB事务（4.0+支持）。
+
+1.3 第三方服务集成
+
+服务类型 推荐服务商 用途 注意事项
+支付 国内：微信支付、支付宝 国外：Stripe、Apple Pay 购买砖石、解锁皮肤 需封装统一支付网关，处理双平台回调
+推送 国内：腾讯移动推送（信鸽） 国外：Firebase Cloud Messaging 专注提醒、好友互动通知 适配双端厂商通道
+公益API 中国绿化基金会“百万森林”API / 国际植树组织 兑换树木后调用真实种植 需签署合作协议，获取接口密钥
+地图 高德地图 / Google Maps 岛屿地理位置展示（未来） 预留接口，MVP暂不使用
+数据分析 腾讯移动分析 / Firebase Analytics 用户行为统计 埋点设计需统一规范
+
+1.4 部署架构
+
+· 云服务商：国内使用腾讯云，国外使用AWS（或统一采用AWS全球覆盖）。
+· 容器化：后端云函数天然无服务器，无需容器；若后续自建微服务，采用Docker + Kubernetes（腾讯云TKE / AWS EKS）。
+· CI/CD：GitHub Actions / 腾讯云CODING。
+  · 主分支推送触发自动化测试 → 构建Flutter应用 → 分发至TestFlight/内测分发平台。
+  · 后端云函数通过Serverless Framework部署至各环境。
+· 存储：
+  · 对象存储：腾讯云COS / AWS S3（用户头像、岛屿截图）。
+  · CDN：腾讯云CDN / CloudFront（加速静态资源）。
+
+---
+
+2. 功能模块详细设计
+
+2.1 用户模块
+
+功能描述：
+
+· 注册/登录：支持手机号（国内）、邮箱（国外）、第三方（微信/Google）登录。
+· 个人资料：昵称、头像、性别（可选）、生日（用于计算岛龄）。
+· 隐私设置：公开/仅好友可见的专注数据、岛屿参观权限。
+
+核心逻辑：
+
+· 首次登录生成默认角色、基础岛屿（一块土地+初始建筑“木屋”）。
+· 使用JWT进行身份认证，Token有效期7天，刷新Token延长会话。
+
+关键数据字段（见第4章用户表）
+
+API接口设计（RESTful）：
+
+```
+POST   /api/v1/auth/register          // 注册
+POST   /api/v1/auth/login             // 登录
+POST   /api/v1/auth/logout             // 登出
+GET    /api/v1/user/profile            // 获取个人资料
+PUT    /api/v1/user/profile            // 更新个人资料
+GET    /api/v1/user/settings           // 获取隐私设置
+PUT    /api/v1/user/settings           // 更新隐私设置
+POST   /api/v1/user/avatar/upload      // 上传头像
+```
+
+2.2 专注计时模块
+
+功能描述：
+
+· 计时模式：倒计时（预设25分钟等）、正计时（无限制）。
+· 白名单：允许用户设置可使用的应用（仅iOS/Android，通过系统API检测）。
+· 中断处理：检测到切换出应用或使用黑名单应用则暂停计时并记录中断原因。
+· 奖励计算：专注1分钟 = 1砖石，连续专注超过25分钟额外奖励10砖石/每25分钟。
+
+核心逻辑流程图（文字描述）：
+
+1. 用户点击开始专注，前端请求后端创建专注记录（状态为进行中）。
+2. 前端启动本地计时器，同时每5分钟向服务器同步一次（防作弊+进度保存）。
+3. 若用户主动暂停或完成，前端计算专注时长，调用完成接口，后端计算砖石并更新用户资产、岛屿资源。
+4. 若发生中断（应用切后台且超时），前端记录中断时间点，恢复时继续或放弃。
+
+关键数据字段（见专注记录表）
+
+API接口设计：
+
+```
+POST   /api/v1/focus/session           // 创建专注会话（开始）
+PUT    /api/v1/focus/session/{id}      // 更新专注进度（同步）
+POST   /api/v1/focus/session/{id}/complete  // 完成专注（计算奖励）
+POST   /api/v1/focus/session/{id}/abort     // 放弃专注
+GET    /api/v1/focus/history            // 获取专注历史（分页）
+```
+
+2.3 岛屿建造模块
+
+功能描述：
+
+· 基础岛屿场景：一块可扩展的网格土地（6x6初始，后续可解锁新区域）。
+· 建筑系统：提供3-5种基础建筑（木屋、风车、灯塔、树木、石头路），每种建筑消耗不同砖石。
+· 砖石消耗：建造/升级建筑扣除砖石，建筑每日产出少量砖石（鼓励留存）。
+· 岛屿状态存储：每个建筑的类型、坐标、等级、建造时间等。
+
+核心逻辑：
+
+· 前端拖拽放置建筑时，先本地校验坐标合法性（不重叠、在网格内），然后调用后端接口确认砖石足够，后端扣减砖石并保存建筑数据。
+· 建筑可升级，升级消耗砖石并缩短未来产出时间。
+
+关键数据字段（见岛屿建筑表）
+
+API接口设计：
+
+```
+GET    /api/v1/island                  // 获取用户岛屿完整信息（建筑列表）
+POST   /api/v1/island/building         // 放置新建筑
+PUT    /api/v1/island/building/{id}    // 移动建筑/升级
+DELETE /api/v1/island/building/{id}    // 拆除建筑（退还部分砖石）
+```
+
+2.4 角色成长模块
+
+功能描述：
+
+· 角色基础形象：低多边形小人，初始服装简单。
+· 等级：通过专注获得经验（每专注1分钟=1经验），等级提升解锁新建筑/皮肤。
+· 技能树（未来迭代）：消耗经验点数激活被动技能（如专注时长加成、砖石产出增加）。
+
+核心逻辑：
+
+· 专注完成时，经验与砖石同时增加。等级提升时前端播放庆祝动画。
+· 技能树仅在后续版本实现，MVP只存储等级和经验。
+
+关键数据字段（见角色表）
+
+API接口设计：
+
+```
+GET    /api/v1/character                // 获取角色信息
+PUT    /api/v1/character/upgrade        // 升级（等级提升后调用，实际可自动触发）
+POST   /api/v1/character/skin/equip     // 装备皮肤（未来）
+```
+
+2.5 任务系统
+
+功能描述：
+
+· 每日任务：登录、专注30分钟、建造1个建筑等，完成后奖励砖石/经验。
+· 周常挑战：累计专注300分钟、邀请好友等，奖励稀有建筑图纸。
+· 随机事件（未来）：如“海龟来访”，完成小任务获得额外奖励。
+
+核心逻辑：
+
+· 任务进度实时更新（专注完成后增加进度）。任务完成后可领取奖励，领取后刷新下一周期任务。
+· 每日任务每天凌晨4点重置（用户所在时区）。
+
+关键数据字段（见任务进度表）
+
+API接口设计：
+
+```
+GET    /api/v1/tasks/daily              // 获取今日任务列表
+GET    /api/v1/tasks/weekly             // 获取周常任务列表
+POST   /api/v1/tasks/{id}/claim         // 领取任务奖励
+```
+
+2.6 社交系统（MVP基础版）
+
+功能描述：
+
+· 好友添加：通过用户ID/手机号搜索发送好友申请，同意后成为好友。
+· 留言：可在好友岛屿的留言板上留言（文本+表情）。
+· 部落（未来）：暂不实现。
+
+核心逻辑：
+
+· 好友关系双向确认，记录成为好友的时间。
+· 留言需审核吗？MVP不做审核，但增加举报功能。
+
+关键数据字段（见好友关系表、留言表）
+
+API接口设计：
+
+```
+GET    /api/v1/friends                   // 好友列表
+POST   /api/v1/friends/request           // 发送好友申请
+PUT    /api/v1/friends/request/{id}/accept // 接受申请
+DELETE /api/v1/friends/{friendId}        // 删除好友
+
+GET    /api/v1/island/{userId}/messages  // 获取某岛屿留言板
+POST   /api/v1/island/{userId}/messages  // 发布留言
+```
+
+2.7 数据统计模块
+
+功能描述：
+
+· 专注趋势：日/周/月专注时长折线图。
+· 建筑总数：岛屿上各类型建筑数量统计。
+· 砖石收支：砖石获取与消耗记录。
+
+核心逻辑：
+
+· 数据来源于专注记录表和建筑表，前端图表展示（使用fl_chart库）。
+· 支持时间范围筛选。
+
+API接口设计：
+
+```
+GET    /api/v1/stats/focus/daily?start=...&end=...  // 每日专注统计
+GET    /api/v1/stats/buildings                       // 建筑统计
+GET    /api/v1/stats/diamonds/transactions           // 砖石流水
+```
+
+2.8 公益兑换模块
+
+功能描述：
+
+· 用户消耗2500砖石兑换一棵真树（通过第三方公益平台种植）。
+· 兑换成功后，用户获得公益证书（图片），岛屿上出现“公益树”特殊装饰。
+
+核心逻辑：
+
+· 兑换时调用第三方API下单，成功后再扣除砖石并记录。
+· 由于第三方可能延迟或失败，采用异步回调更新状态。
+
+关键数据字段（见公益兑换记录表）
+
+API接口设计：
+
+```
+POST   /api/v1/donate/tree               // 兑换树木
+GET    /api/v1/donate/history             // 兑换历史
+```
+
+2.9 时间遗产模块（预留）
+
+功能描述：
+
+· 用户可指定一位继承人，当自己长期未登录（如超过1年），遗产（岛屿、砖石）可转移给继承人。
+· 未来实现，先预留数据字段。
+
+关键数据字段：用户表增加heir_user_id、last_active_time。
+
+---
+
+3. UI/UX 设计规范
+
+3.1 全局样式（MD3定制）
+
+· 主色调：
+  · 主色深绿 #1B5E20 – 用于主要按钮、导航栏、强调文字。
+  · 辅色暖金 #FFB74D – 用于图标、进度条、等级特效。
+  · 强调深海蓝 #0D47A1 – 用于链接、选中状态、特殊提示。
+· 背景：浅色模式为主，可选深色模式（后续）。
+· 字体：
+  · 标题：Google Sans（或Roboto Medium）
+  · 正文：Roboto Regular
+  · 数字：Roboto Mono（专注计时器、砖石数量）
+· 组件尺寸：
+  · 圆角大号按钮：圆角24px，高度56px，内边距水平24px。
+  · 半透明卡片：背景色白色/黑色 0.8透明度，圆角16px，内边距16px。
+  · 弧形进度条：宽度8px，圆弧角度270度。
+  · 线性图标：线条粗细2px，尺寸24x24。
+
+3.2 核心页面清单（至少8个）
+
+页面名称 布局描述 交互说明
+启动页/引导页 中心显示岛屿剪影插图，下方加载进度条 首次安装显示引导页（3页功能简介），之后直接进入首页
+首页（岛屿） 上方显示角色头像、等级、砖石；中间为岛屿网格（可缩放拖拽）；底部为建造菜单（建筑图标） 点击建筑进入放置模式，再次点击确认放置；长按建筑弹出升级/拆除选项
+专注计时页 顶部显示今日专注时长；中央大号弧形进度条（倒计时）、时间数字；下方“开始”按钮；底部可展开白名单应用列表 开始后按钮变为暂停/完成；中断时弹出提示
+任务中心页 分为“每日”“周常”两个Tab，列表显示任务名称、进度、奖励，已完成任务显示“领取”按钮 点击任务可查看详情；领取后立即增加砖石/经验
+角色成长页 展示角色3D模型（旋转查看）；下方属性：等级、经验条；技能树（占位） 点击等级可查看升级奖励
+社交页 顶部搜索框；下方“好友动态”列表（好友专注成就、建造动态）；底部导航至留言板 点击好友头像可访问其岛屿（只读模式）
+数据统计页 顶部切换日/周/月；下方折线图；卡片展示建筑统计、砖石收支 点击图表可查看详细数据列表
+公益兑换页 显示当前砖石数量、兑换按钮（2500砖石/棵）；下方历史兑换列表（含证书预览） 点击兑换触发二次确认；兑换成功后弹出证书动画
+个人中心页 头像、昵称、设置入口；隐私设置；我的岛屿预览 点击头像更换；设置项包含通知、账号安全等
+
+3.3 图片占位符清单（含AI生成提示词）
+
+用途 占位符描述 AI生成提示词（英文，供Midjourney/DALL·E使用）
+启动页插图 远方岛屿剪影，海面发光砖石 Silhouette of a distant island with glowing gems floating on the sea surface, sunset sky, digital art, soft colors, low poly style, 8k
+角色形象 低多边形可爱小人 Low poly cute little character, standing, friendly smile, simple design, pastel colors, 3D render, isometric view, white background
+岛屿场景 低多边形岛屿俯瞰 Aerial view of a low poly tropical island with tiny buildings, palm trees, turquoise water, sunny day, game art style, vibrant colors
+专注完成庆祝动画 关键帧：砖石飞向岛屿 Explosion of golden gems flying towards a small island, celebration, confetti, bright colors, keyframe animation style, 2D illustration
+应用图标 鸟衔砖石 / 灯塔 Minimalist logo: a bird carrying a glowing diamond in its beak, or a lighthouse with a diamond as light, vector style, green and gold
+图标（发光砖石） 发光砖石 Glowing diamond gem, pixel art style, sparkling effect, isolated on black background
+
+---
+
+4. 数据库表结构
+
+采用MongoDB（集合对应表），以下为字段设计。
+
+4.1 用户表（users）
+
+字段名 类型 索引 说明
+_id ObjectId 主键 
+phone string 唯一 手机号（国内）
+email string 唯一 邮箱（国外）
+password_hash string  加密密码
+auth_provider string  local/wechat/google
+openid string 索引 第三方唯一ID
+nickname string  昵称，默认随机
+avatar_url string  头像地址
+gender int  0未知 1男 2女
+birthday date  
+heir_user_id ObjectId  继承人ID（预留）
+last_active_time date 索引 最后活跃时间
+created_at date 索引 
+updated_at date  
+
+4.2 专注记录表（focus_sessions）
+
+字段名 类型 索引 说明
+_id ObjectId 主键 
+user_id ObjectId 外键 
+start_time date 索引 开始时间
+end_time date  实际结束时间
+planned_duration int  计划时长（分钟），0表示正计时
+actual_duration int  实际专注分钟数
+diamonds_earned int  获得砖石
+interruptions int  中断次数
+status string  ongoing/completed/aborted
+created_at date  
+
+4.3 岛屿建筑表（island_buildings）
+
+字段名 类型 索引 说明
+_id ObjectId 主键 
+user_id ObjectId 外键 
+building_type string  house/windmill/lighthouse/tree/road
+level int  等级，默认为1
+x int  网格X坐标
+y int  网格Y坐标
+placed_at date  建造时间
+last_collected_at date  上次产出收集时间（用于离线产出）
+
+4.4 角色表（characters）
+
+字段名 类型 索引 说明
+_id ObjectId 主键 
+user_id ObjectId 唯一外键 
+level int  等级
+exp int  当前经验值
+skin_id string  当前皮肤ID（预留）
+skill_tree object  技能树解锁状态（JSON）
+
+4.5 任务进度表（tasks_progress）
+
+字段名 类型 索引 说明
+_id ObjectId 主键 
+user_id ObjectId 外键 
+task_id string  任务唯一标识（如daily_login）
+task_type string  daily/weekly
+progress int  当前进度
+target int  目标值
+status string  inactive/active/completed/claimed
+cycle_start date  周期开始日期（用于重置）
+claimed_at date  领取时间
+
+4.6 好友关系表（friendships）
+
+字段名 类型 索引 说明
+_id ObjectId 主键 
+user_id ObjectId 外键 申请人
+friend_id ObjectId 外键 被申请人
+status string  pending/accepted/blocked
+created_at date  
+updated_at date  
+
+4.7 留言表（messages）
+
+字段名 类型 索引 说明
+_id ObjectId 主键 
+island_user_id ObjectId 外键 岛屿所有者
+from_user_id ObjectId 外键 留言者
+content string  文本内容
+created_at date 索引 
+
+4.8 公益兑换记录表（donations）
+
+字段名 类型 索引 说明
+_id ObjectId 主键 
+user_id ObjectId 外键 
+diamonds_spent int  消耗砖石（2500）
+trees_count int  树木数量（默认1）
+order_id string  第三方订单号
+certificate_url string  证书图片地址
+status string  pending/success/failed
+created_at date  
+completed_at date  
+
+4.9 部落表（tribes，预留）
+
+略
+
+---
+
+5. API 接口文档
+
+遵循RESTful风格，基础URL：https://api.chronohaven.com/v1
+所有请求需在Header中携带Authorization: Bearer <token>（登录接口除外）。
+返回格式统一为JSON：
+
+```json
+{
+  "code": 0,       // 0成功，非0错误码
+  "message": "ok",
+  "data": { ... }
+}
+```
+
+5.1 用户模块
+
+注册
+POST /auth/register
+请求体：
+
+```json
+{
+  "phone": "13800138000",
+  "password": "123456",
+  "nickname": "岛主"
+}
+```
+
+返回：
+
+```json
+{
+  "code": 0,
+  "data": {
+    "token": "jwt_token",
+    "user": { ... }
+  }
+}
+```
+
+登录
+POST /auth/login
+请求体：
+
+```json
+{
+  "phone": "13800138000",
+  "password": "123456"
+}
+```
+
+返回同上。
+
+获取个人资料
+GET /user/profile
+返回：
+
+```json
+{
+  "code": 0,
+  "data": {
+    "_id": "60d...",
+    "nickname": "岛主",
+    "avatar_url": "https://...",
+    "gender": 1,
+    "birthday": "1990-01-01",
+    "created_at": "2025-01-01T00:00:00Z"
+  }
+}
+```
+
+更新个人资料
+PUT /user/profile
+请求体：
+
+```json
+{
+  "nickname": "新名字",
+  "gender": 2,
+  "birthday": "1995-05-05"
+}
+```
+
+5.2 专注模块
+
+开始专注
+POST /focus/session
+请求体：
+
+```json
+{
+  "planned_duration": 25  // 分钟，0表示正计时
+}
+```
+
+返回：
+
+```json
+{
+  "code": 0,
+  "data": {
+    "_id": "session_id",
+    "start_time": "2025-07-15T10:00:00Z",
+    "status": "ongoing"
+  }
+}
+```
+
+同步进度
+PUT /focus/session/{id}
+请求体：
+
+```json
+{
+  "actual_duration": 10,   // 已专注分钟数
+  "interruptions": 1
+}
+```
+
+完成专注
+POST /focus/session/{id}/complete
+请求体（可选）：
+
+```json
+{
+  "actual_duration": 25,
+  "interruptions": 0
+}
+```
+
+返回：
+
+```json
+{
+  "code": 0,
+  "data": {
+    "diamonds_earned": 30,
+    "exp_earned": 25,
+    "new_level": 5,
+    "total_exp": 1250
+  }
+}
+```
+
+5.3 岛屿模块
+
+获取岛屿
+GET /island
+返回：
+
+```json
+{
+  "code": 0,
+  "data": {
+    "user_id": "...",
+    "buildings": [
+      {
+        "_id": "bld1",
+        "type": "house",
+        "level": 2,
+        "x": 2,
+        "y": 3,
+        "placed_at": "..."
+      }
+    ],
+    "grid_size": 6
+  }
+}
+```
+
+放置建筑
+POST /island/building
+请求体：
+
+```json
+{
+  "building_type": "house",
+  "x": 2,
+  "y": 3
+}
+```
+
+返回：
+
+```json
+{
+  "code": 0,
+  "data": {
+    "_id": "new_building_id",
+    "level": 1,
+    "placed_at": "..."
+  }
+}
+```
+
+错误码：4001砖石不足，4002位置已占用。
+
+5.4 任务模块
+
+获取每日任务
+GET /tasks/daily
+返回：
+
+```json
+{
+  "code": 0,
+  "data": [
+    {
+      "task_id": "daily_login",
+      "name": "每日登录",
+      "progress": 1,
+      "target": 1,
+      "reward_diamonds": 10,
+      "reward_exp": 5,
+      "status": "completed",
+      "can_claim": true
+    }
+  ]
+}
+```
+
+领取奖励
+POST /tasks/{id}/claim
+返回：
+
+```json
+{
+  "code": 0,
+  "data": {
+    "diamonds_added": 10,
+    "exp_added": 5,
+    "new_balance": 500
+  }
+}
+```
+
+5.5 社交模块
+
+搜索用户
+GET /user/search?keyword=13800138000
+返回用户简要信息列表。
+
+发送好友申请
+POST /friends/request
+请求体：
+
+```json
+{
+  "friend_id": "target_user_id"
+}
+```
+
+接受申请
+PUT /friends/request/{requestId}/accept
+
+5.6 公益兑换
+
+兑换树木
+POST /donate/tree
+请求体：
+
+```json
+{
+  "diamonds": 2500
+}
+```
+
+返回：
+
+```json
+{
+  "code": 0,
+  "data": {
+    "donation_id": "...",
+    "status": "pending",
+    "certificate_url": null
+  }
+}
+```
+
+（由于异步，需后续轮询或推送通知）
+
+---
+
+6. 核心代码示例
+
+6.1 专注计时（前端Flutter）
+
+```dart
+// focus_timer.dart
+class FocusTimer extends StatefulWidget {
+  @override
+  _FocusTimerState createState() => _FocusTimerState();
+}
+
+class _FocusTimerState extends State<FocusTimer> {
+  Timer? _timer;
+  int _seconds = 0;
+  int _plannedMinutes = 25;
+  bool _isRunning = false;
+  String _sessionId = '';
+
+  void _startFocus() async {
+    // 请求后端创建会话
+    final response = await api.post('/focus/session', body: {
+      'planned_duration': _plannedMinutes,
+    });
+    _sessionId = response['_id'];
+    setState(() => _isRunning = true);
+    _timer = Timer.periodic(Duration(seconds: 1), (timer) {
+      setState(() => _seconds++);
+      // 每5分钟同步一次
+      if (_seconds % 300 == 0) {
+        _syncProgress();
+      }
+    });
+  }
+
+  void _syncProgress() async {
+    await api.put('/focus/session/$_sessionId', body: {
+      'actual_duration': _seconds ~/ 60,
+      'interruptions': 0, // 可从外部传入
+    });
+  }
+
+  void _completeFocus() async {
+    _timer?.cancel();
+    final response = await api.post('/focus/session/$_sessionId/complete', body: {
+      'actual_duration': _seconds ~/ 60,
+    });
+    // 显示奖励动画
+    showDialog(...);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Column(
+          children: [
+            Text(
+              '${(_plannedMinutes*60 - _seconds) ~/ 60}:${((_plannedMinutes*60 - _seconds) % 60).toString().padLeft(2,'0')}',
+              style: GoogleFonts.robotoMono(fontSize: 48),
+            ),
+            ElevatedButton(
+              onPressed: _isRunning ? _completeFocus : _startFocus,
+              child: Text(_isRunning ? '完成' : '开始'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+```
+
+6.2 建筑放置（后端Node.js云函数）
+
+```javascript
+// 放置建筑云函数
+exports.placeBuilding = async (event, context) => {
+  const { userId, buildingType, x, y } = event;
+  const db = await getMongoDB();
+  const session = db.startSession();
+  
+  try {
+    await session.withTransaction(async () => {
+      // 检查砖石
+      const user = await db.collection('users').findOne({ _id: userId }, { session });
+      const buildingCost = getBuildingCost(buildingType);
+      if (user.diamonds < buildingCost) {
+        throw new Error('INSUFFICIENT_DIAMONDS');
+      }
+      
+      // 检查坐标是否可用
+      const existing = await db.collection('buildings').findOne({
+        user_id: userId,
+        x, y
+      }, { session });
+      if (existing) {
+        throw new Error('POSITION_OCCUPIED');
+      }
+      
+      // 扣砖石
+      await db.collection('users').updateOne(
+        { _id: userId },
+        { $inc: { diamonds: -buildingCost } },
+        { session }
+      );
+      
+      // 创建建筑
+      const result = await db.collection('buildings').insertOne({
+        user_id: userId,
+        building_type: buildingType,
+        level: 1,
+        x,
+        y,
+        placed_at: new Date(),
+        last_collected_at: new Date()
+      }, { session });
+      
+      return result.insertedId;
+    });
+    
+    return { code: 0, data: { buildingId: result.insertedId } };
+  } catch (err) {
+    return { code: 4001, message: err.message };
+  } finally {
+    await session.endSession();
+  }
+};
+```
+
+6.3 任务更新（专注完成后触发）
+
+```javascript
+// 专注完成后，更新相关任务进度
+async function updateTaskProgress(userId, focusMinutes) {
+  const db = await getMongoDB();
+  const today = moment().startOf('day').toDate();
+  
+  // 更新每日任务“专注30分钟”
+  await db.collection('tasks_progress').updateOne(
+    {
+      user_id: userId,
+      task_id: 'daily_focus_30',
+      cycle_start: today,
+      status: { $in: ['active', 'completed'] }
+    },
+    {
+      $inc: { progress: focusMinutes },
+      $setOnInsert: { target: 30, task_type: 'daily' }
+    },
+    { upsert: true }
+  );
+  
+  // 如果进度达到目标且状态为active，自动标记为completed（但不自动领取）
+  await db.collection('tasks_progress').updateMany(
+    {
+      user_id: userId,
+      status: 'active',
+      progress: { $gte: '$target' }
+    },
+    { $set: { status: 'completed' } }
+  );
+}
+```
+
+---
+
+7. 开发计划与里程碑
+
+MVP版本（v1.0）功能清单
+
+· 用户注册/登录（手机/邮箱）
+· 专注计时（倒计时/正计时，基础白名单检测）
+· 砖石奖励计算
+· 岛屿建造（6x6网格，5种建筑：木屋、风车、灯塔、树、石头路）
+· 角色等级（跟随专注经验提升）
+· 每日任务（登录、专注、建造）
+· 好友添加（搜索ID发送申请）
+· 岛屿留言板
+· 数据统计（专注时长趋势、建筑统计）
+· 公益兑换（调用模拟API，消耗2500砖石）
+· 基础MD3 UI
+
+预估开发时间：
+
+· 前端（2人）：3个月
+· 后端（1人）：2.5个月
+· 测试/部署：1个月
+  总人月：约 8 人月（3人团队约3个月）
+
+v1.5（游戏化扩展）
+
+· 周常任务
+· 角色技能树（初级）
+· 随机事件（海龟、流星）
+· 部落（共生群岛）基础功能
+
+v2.0
+
+· 宠物系统
+· 区域解锁（森林、山顶）
+· 时间遗产模块
+
+---
+
+8. 测试策略
+
+8.1 单元测试
+
+· 前端：使用Flutter test测试核心工具函数、计时器逻辑、状态管理（Provider/Bloc）。
+· 后端：使用Jest测试云函数业务逻辑，模拟数据库交互。
+
+8.2 集成测试
+
+· API测试：使用Postman/Newman或Supertest对每个接口进行自动化测试，覆盖成功/失败场景。
+· 第三方集成：模拟支付回调、公益API，测试异常处理。
+
+8.3 UI测试
+
+· Flutter集成测试：模拟用户点击流程（专注-建造-社交），验证页面跳转和数据显示。
+· 真机兼容性测试：覆盖iOS/Android主流版本和屏幕尺寸。
+
+8.4 性能测试
+
+· 专注计时：测试长时间计时下内存占用，中断恢复准确性。
+· 并发：使用JMeter模拟1000用户同时专注，观察后端响应时间（期望<200ms）。
+· 数据库：对专注记录表建立索引，测试分页查询性能。
+
+8.5 安全测试
+
+· 认证：JWT签名校验，防止伪造。
+· 输入校验：防止SQL注入（MongoDB注入）、XSS（用户留言过滤）。
+· 支付安全：回调签名验证，防重放攻击。
+· 数据加密：用户敏感信息（手机号）加密存储。
+
+---
+
+9. 部署与运维方案
+
+9.1 环境配置
+
+环境 域名 数据库 云函数别名
+开发 dev-api.chronohaven.com dev-db dev
+测试 test-api.chronohaven.com test-db test
+生产 api.chronohaven.com prod-db prod
+
+使用Serverless Framework管理云函数，通过stage参数区分。
+
+9.2 监控与日志
+
+· 应用监控：腾讯云云监控 / AWS CloudWatch，设置CPU、内存、错误率告警。
+· 日志：云函数日志输出到日志服务（如腾讯云CLS），按天索引，支持关键字搜索。
+· 用户行为：接入Firebase Analytics或腾讯移动分析，自定义事件（专注开始、建造、兑换）。
+
+9.3 数据备份与恢复
+
+· MongoDB Atlas：每天自动快照，保留7天；开启增量备份。
+· 对象存储：跨区域复制，防止单点故障。
+· 备份验证：每月恢复一次备份到测试环境，确保可用性。
+
+---
+
+10. 风险与应对
+
+风险类型 风险描述 应对措施
+技术风险 专注计时在弱网或切后台时数据不一致 前端本地缓存+定期同步；后端记录最后同步时间，冲突时以客户端时长较长者为准（防作弊）
+ 岛屿网格坐标冲突（多人同时操作） 后端使用乐观锁（版本号）或事务保证原子性
+成本风险 第三方公益API调用费用超出预算 设定每日兑换上限；与公益组织谈判固定捐赠额度
+ 云函数调用量激增导致费用不可控 设置函数并发上限，使用缓存减少重复计算；启用成本监控告警
+合规风险 用户数据跨境存储（国外用户） 采用多云部署，国内用户数据存储腾讯云，国外用户数据存储AWS，遵守GDPR/个人信息保护法
+ 支付接口资质 国内对接微信/支付宝需企业资质，提前申请；国外使用Stripe可快速接入
+运营风险 用户作弊刷砖石 限制专注时长上限（单次不超过4小时）；异常行为检测（如24小时专注超过20小时）
+可以用supabase 作database 
+支付方式用收款码
+
+帮我完成软件开发
