@@ -4,21 +4,22 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
 import Animated, { FadeIn, FadeInDown, useAnimatedStyle, useSharedValue, withTiming, withRepeat, withSequence, Easing } from 'react-native-reanimated';
-import Svg, { Circle } from 'react-native-svg';
+import Svg, { Circle, Defs, LinearGradient as SvgGradient, Stop } from 'react-native-svg';
 import Colors from '@/constants/colors';
 import { useGame } from '@/lib/game-state';
 
 const PRESETS = [
-  { label: '25分钟', minutes: 25 },
-  { label: '45分钟', minutes: 45 },
-  { label: '60分钟', minutes: 60 },
-  { label: '自由', minutes: 0 },
+  { label: '25', sub: '分钟', minutes: 25 },
+  { label: '45', sub: '分钟', minutes: 45 },
+  { label: '60', sub: '分钟', minutes: 60 },
+  { label: '', sub: '自由', minutes: 0, icon: 'infinite' as const },
 ];
 
-const CIRCLE_SIZE = 240;
-const STROKE_WIDTH = 10;
+const CIRCLE_SIZE = 260;
+const STROKE_WIDTH = 12;
 const RADIUS = (CIRCLE_SIZE - STROKE_WIDTH) / 2;
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 
@@ -43,35 +44,38 @@ export default function FocusScreen() {
 
   const strokeDashoffset = CIRCUMFERENCE * (1 - progress);
 
-  const displayMinutes = Math.floor(elapsedSeconds / 60);
-  const displaySeconds = elapsedSeconds % 60;
-  const timeString = `${String(displayMinutes).padStart(2, '0')}:${String(displaySeconds).padStart(2, '0')}`;
+  const remainingSeconds = isCountUp ? elapsedSeconds : Math.max(0, totalSeconds - elapsedSeconds);
+  const displayTime = `${String(Math.floor(remainingSeconds / 60)).padStart(2, '0')}:${String(remainingSeconds % 60).padStart(2, '0')}`;
 
-  const remainingMinutes = isCountUp ? 0 : Math.max(0, Math.ceil((totalSeconds - elapsedSeconds) / 60));
-  const remainingSeconds = isCountUp ? 0 : Math.max(0, totalSeconds - elapsedSeconds);
-  const remainingTimeString = isCountUp
-    ? timeString
-    : `${String(Math.floor(remainingSeconds / 60)).padStart(2, '0')}:${String(remainingSeconds % 60).padStart(2, '0')}`;
-
-  const pulseOpacity = useSharedValue(1);
+  const pulseScale = useSharedValue(1);
+  const glowOpacity = useSharedValue(0);
 
   useEffect(() => {
     if (isRunning && !isPaused) {
-      pulseOpacity.value = withRepeat(
+      pulseScale.value = withRepeat(
         withSequence(
-          withTiming(0.5, { duration: 1000, easing: Easing.inOut(Easing.ease) }),
-          withTiming(1, { duration: 1000, easing: Easing.inOut(Easing.ease) })
-        ),
-        -1,
-        true
+          withTiming(1.04, { duration: 1500, easing: Easing.inOut(Easing.ease) }),
+          withTiming(1, { duration: 1500, easing: Easing.inOut(Easing.ease) })
+        ), -1, true
+      );
+      glowOpacity.value = withRepeat(
+        withSequence(
+          withTiming(0.6, { duration: 2000, easing: Easing.inOut(Easing.ease) }),
+          withTiming(0.2, { duration: 2000, easing: Easing.inOut(Easing.ease) })
+        ), -1, true
       );
     } else {
-      pulseOpacity.value = withTiming(1, { duration: 300 });
+      pulseScale.value = withTiming(1, { duration: 300 });
+      glowOpacity.value = withTiming(0, { duration: 300 });
     }
   }, [isRunning, isPaused]);
 
   const pulseStyle = useAnimatedStyle(() => ({
-    opacity: pulseOpacity.value,
+    transform: [{ scale: pulseScale.value }],
+  }));
+
+  const glowStyle = useAnimatedStyle(() => ({
+    opacity: glowOpacity.value,
   }));
 
   const startTimer = useCallback(() => {
@@ -80,7 +84,6 @@ export default function FocusScreen() {
     setElapsedSeconds(0);
     startTimeRef.current = new Date().toISOString();
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-
     timerRef.current = setInterval(() => {
       setElapsedSeconds(prev => {
         const next = prev + 1;
@@ -123,16 +126,11 @@ export default function FocusScreen() {
       setElapsedSeconds(0);
       return;
     }
-
     let diamonds = actualMinutes;
-    const bonusBlocks = Math.floor(actualMinutes / 25);
-    diamonds += bonusBlocks * 10;
-
+    diamonds += Math.floor(actualMinutes / 25) * 10;
     const expEarned = actualMinutes;
-
     addDiamonds(diamonds);
     addExp(expEarned);
-
     completeFocus({
       startTime: startTimeRef.current,
       endTime: new Date().toISOString(),
@@ -142,15 +140,12 @@ export default function FocusScreen() {
       expEarned,
       status: 'completed',
     });
-
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-
     Alert.alert(
       '专注完成!',
-      `专注 ${actualMinutes} 分钟\n获得 ${diamonds} 砖石\n获得 ${expEarned} 经验`,
+      `专注 ${actualMinutes} 分钟\n获得 ${diamonds} 砖石 + ${expEarned} 经验`,
       [{ text: '太棒了!' }]
     );
-
     setIsRunning(false);
     setElapsedSeconds(0);
     if (timerRef.current) clearInterval(timerRef.current);
@@ -160,18 +155,11 @@ export default function FocusScreen() {
     if (timerRef.current) clearInterval(timerRef.current);
     const actualMinutes = Math.floor(elapsedSeconds / 60);
     if (actualMinutes >= 1) {
-      Alert.alert(
-        '结束专注?',
-        `已专注 ${actualMinutes} 分钟`,
-        [
-          { text: '继续', style: 'cancel', onPress: () => resumeTimer() },
-          { text: '结束并获取奖励', onPress: () => finishSession(elapsedSeconds) },
-          { text: '放弃', style: 'destructive', onPress: () => {
-            setIsRunning(false);
-            setElapsedSeconds(0);
-          }},
-        ]
-      );
+      Alert.alert('结束专注?', `已专注 ${actualMinutes} 分钟`, [
+        { text: '继续', style: 'cancel', onPress: () => resumeTimer() },
+        { text: '结束并领取', onPress: () => finishSession(elapsedSeconds) },
+        { text: '放弃', style: 'destructive', onPress: () => { setIsRunning(false); setElapsedSeconds(0); } },
+      ]);
     } else {
       setIsRunning(false);
       setElapsedSeconds(0);
@@ -179,189 +167,224 @@ export default function FocusScreen() {
   }, [elapsedSeconds, resumeTimer, finishSession]);
 
   useEffect(() => {
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, []);
 
   const todayFocus = state.focusHistory
-    .filter(s => {
-      const d = new Date(s.startTime);
-      const now = new Date();
-      return d.toDateString() === now.toDateString();
-    })
+    .filter(s => new Date(s.startTime).toDateString() === new Date().toDateString())
     .reduce((sum, s) => sum + s.actualDuration, 0);
 
+  const earnedSoFar = Math.floor(elapsedSeconds / 60);
+
   return (
-    <View style={[styles.container, { paddingTop: insets.top + webTopInset }]}>
-      <Animated.View entering={FadeInDown.duration(400)} style={styles.header}>
-        <Text style={styles.headerTitle}>专注</Text>
-        <View style={styles.todayBadge}>
-          <Ionicons name="time-outline" size={14} color={Colors.primary} />
-          <Text style={styles.todayText}>今日 {todayFocus} 分钟</Text>
-        </View>
-      </Animated.View>
-
-      <View style={styles.timerContainer}>
-        <Animated.View entering={FadeIn.duration(600).delay(200)} style={styles.circleWrap}>
-          <Svg width={CIRCLE_SIZE} height={CIRCLE_SIZE}>
-            <Circle
-              cx={CIRCLE_SIZE / 2}
-              cy={CIRCLE_SIZE / 2}
-              r={RADIUS}
-              stroke={Colors.border}
-              strokeWidth={STROKE_WIDTH}
-              fill="none"
-            />
-            <Circle
-              cx={CIRCLE_SIZE / 2}
-              cy={CIRCLE_SIZE / 2}
-              r={RADIUS}
-              stroke={Colors.primary}
-              strokeWidth={STROKE_WIDTH}
-              fill="none"
-              strokeLinecap="round"
-              strokeDasharray={CIRCUMFERENCE}
-              strokeDashoffset={strokeDashoffset}
-              transform={`rotate(-90 ${CIRCLE_SIZE / 2} ${CIRCLE_SIZE / 2})`}
-            />
-          </Svg>
-          <View style={styles.timerInner}>
-            <Animated.Text style={[styles.timerText, isRunning && pulseStyle]}>
-              {isCountUp ? timeString : remainingTimeString}
-            </Animated.Text>
-            <Text style={styles.timerSubtext}>
-              {isRunning ? (isCountUp ? '自由专注中' : '剩余时间') : (isCountUp ? '自由模式' : `${plannedMinutes} 分钟`)}
-            </Text>
+    <View style={styles.container}>
+      <LinearGradient colors={['#F5F9F0', Colors.background, '#EEF2E8']} style={[styles.bg, { paddingTop: insets.top + webTopInset }]}>
+        <Animated.View entering={FadeInDown.duration(400)} style={styles.header}>
+          <Text style={styles.headerTitle}>专注</Text>
+          <View style={styles.todayPill}>
+            <Ionicons name="flame" size={14} color={Colors.goldDark} />
+            <Text style={styles.todayText}>今日 {todayFocus} 分钟</Text>
           </View>
         </Animated.View>
-      </View>
 
-      {!isRunning && (
-        <Animated.View entering={FadeInDown.duration(400).delay(300)} style={styles.presetsRow}>
-          {PRESETS.map((p, i) => (
-            <Pressable
-              key={i}
-              style={[
-                styles.presetBtn,
-                selectedPreset === i && styles.presetBtnActive,
-              ]}
-              onPress={() => {
-                setSelectedPreset(i);
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-              }}
-            >
-              <Text style={[styles.presetText, selectedPreset === i && styles.presetTextActive]}>
-                {p.label}
+        <View style={styles.timerSection}>
+          <Animated.View entering={FadeIn.duration(600).delay(200)} style={[styles.circleOuter]}>
+            <Animated.View style={[styles.glowRing, glowStyle]} />
+            <Animated.View style={pulseStyle}>
+              <Svg width={CIRCLE_SIZE} height={CIRCLE_SIZE}>
+                <Defs>
+                  <SvgGradient id="grad" x1="0" y1="0" x2="1" y2="1">
+                    <Stop offset="0" stopColor={Colors.primary} />
+                    <Stop offset="1" stopColor={Colors.primaryLight} />
+                  </SvgGradient>
+                </Defs>
+                <Circle
+                  cx={CIRCLE_SIZE / 2} cy={CIRCLE_SIZE / 2} r={RADIUS}
+                  stroke={Colors.border + '60'} strokeWidth={STROKE_WIDTH} fill="none"
+                />
+                <Circle
+                  cx={CIRCLE_SIZE / 2} cy={CIRCLE_SIZE / 2} r={RADIUS}
+                  stroke="url(#grad)" strokeWidth={STROKE_WIDTH} fill="none"
+                  strokeLinecap="round"
+                  strokeDasharray={CIRCUMFERENCE} strokeDashoffset={strokeDashoffset}
+                  transform={`rotate(-90 ${CIRCLE_SIZE / 2} ${CIRCLE_SIZE / 2})`}
+                />
+              </Svg>
+            </Animated.View>
+            <View style={styles.timerCenter}>
+              <Text style={styles.timerDisplay}>{displayTime}</Text>
+              <Text style={styles.timerLabel}>
+                {isRunning
+                  ? isPaused ? '已暂停' : isCountUp ? '自由专注中' : '剩余时间'
+                  : isCountUp ? '无限模式' : `${plannedMinutes} 分钟`}
               </Text>
-            </Pressable>
-          ))}
-        </Animated.View>
-      )}
+              {isRunning && earnedSoFar > 0 && (
+                <View style={styles.earningRow}>
+                  <Ionicons name="diamond" size={12} color={Colors.diamond} />
+                  <Text style={styles.earningText}>+{earnedSoFar}</Text>
+                </View>
+              )}
+            </View>
+          </Animated.View>
+        </View>
 
-      <View style={styles.controlsRow}>
-        {!isRunning ? (
-          <Pressable
-            style={({ pressed }) => [styles.startBtn, { transform: [{ scale: pressed ? 0.95 : 1 }] }]}
-            onPress={startTimer}
-          >
-            <Ionicons name="play" size={28} color={Colors.textOnPrimary} />
-          </Pressable>
-        ) : (
-          <View style={styles.runningControls}>
-            {isPaused ? (
+        {!isRunning && (
+          <Animated.View entering={FadeInDown.duration(400).delay(300)} style={styles.presetsRow}>
+            {PRESETS.map((p, i) => (
               <Pressable
-                style={({ pressed }) => [styles.controlBtn, styles.resumeBtn, { transform: [{ scale: pressed ? 0.95 : 1 }] }]}
-                onPress={resumeTimer}
+                key={i}
+                onPress={() => { setSelectedPreset(i); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); }}
+                style={({ pressed }) => [
+                  styles.presetCard,
+                  selectedPreset === i && styles.presetCardActive,
+                  { transform: [{ scale: pressed ? 0.93 : 1 }] },
+                ]}
               >
-                <Ionicons name="play" size={24} color={Colors.textOnPrimary} />
+                {selectedPreset === i ? (
+                  <LinearGradient colors={[Colors.primary, Colors.primaryLight]} style={styles.presetGradient}>
+                    {p.icon ? (
+                      <Ionicons name={p.icon} size={20} color="#fff" />
+                    ) : (
+                      <Text style={styles.presetNumActive}>{p.label}</Text>
+                    )}
+                    <Text style={styles.presetSubActive}>{p.sub}</Text>
+                  </LinearGradient>
+                ) : (
+                  <View style={styles.presetInner}>
+                    {p.icon ? (
+                      <Ionicons name={p.icon} size={20} color={Colors.textMuted} />
+                    ) : (
+                      <Text style={styles.presetNum}>{p.label}</Text>
+                    )}
+                    <Text style={styles.presetSub}>{p.sub}</Text>
+                  </View>
+                )}
               </Pressable>
-            ) : (
-              <Pressable
-                style={({ pressed }) => [styles.controlBtn, styles.pauseBtn, { transform: [{ scale: pressed ? 0.95 : 1 }] }]}
-                onPress={pauseTimer}
-              >
-                <Ionicons name="pause" size={24} color={Colors.gold} />
-              </Pressable>
-            )}
-            <Pressable
-              style={({ pressed }) => [styles.controlBtn, styles.stopBtn, { transform: [{ scale: pressed ? 0.95 : 1 }] }]}
-              onPress={stopTimer}
-            >
-              <Ionicons name="stop" size={24} color={Colors.error} />
-            </Pressable>
-          </View>
+            ))}
+          </Animated.View>
         )}
-      </View>
 
-      <Animated.View entering={FadeInDown.duration(400).delay(500)} style={styles.rewardInfo}>
-        <View style={styles.rewardCard}>
-          <Ionicons name="diamond" size={18} color={Colors.diamond} />
-          <Text style={styles.rewardLabel}>1分钟 = 1砖石</Text>
+        <View style={styles.controlsSection}>
+          {!isRunning ? (
+            <Pressable
+              style={({ pressed }) => [{ transform: [{ scale: pressed ? 0.92 : 1 }] }]}
+              onPress={startTimer}
+            >
+              <LinearGradient colors={[Colors.primary, Colors.primaryDark]} style={styles.startBtn}>
+                <Ionicons name="play" size={30} color="#fff" />
+              </LinearGradient>
+            </Pressable>
+          ) : (
+            <View style={styles.runControls}>
+              {isPaused ? (
+                <Pressable onPress={resumeTimer} style={({ pressed }) => [{ transform: [{ scale: pressed ? 0.93 : 1 }] }]}>
+                  <LinearGradient colors={[Colors.primary, Colors.primaryLight]} style={styles.controlCircle}>
+                    <Ionicons name="play" size={24} color="#fff" />
+                  </LinearGradient>
+                </Pressable>
+              ) : (
+                <Pressable onPress={pauseTimer} style={({ pressed }) => [{ transform: [{ scale: pressed ? 0.93 : 1 }] }]}>
+                  <View style={styles.pauseCircle}>
+                    <Ionicons name="pause" size={24} color={Colors.primary} />
+                  </View>
+                </Pressable>
+              )}
+              <Pressable onPress={stopTimer} style={({ pressed }) => [{ transform: [{ scale: pressed ? 0.93 : 1 }] }]}>
+                <View style={styles.stopCircle}>
+                  <Ionicons name="stop" size={22} color={Colors.error} />
+                </View>
+              </Pressable>
+            </View>
+          )}
         </View>
-        <View style={styles.rewardCard}>
-          <Ionicons name="gift" size={18} color={Colors.gold} />
-          <Text style={styles.rewardLabel}>每25分钟额外+10</Text>
-        </View>
-      </Animated.View>
+
+        <Animated.View entering={FadeInDown.duration(400).delay(500)} style={[styles.rewardBar, { marginBottom: Platform.OS === 'web' ? 94 : 100 }]}>
+          <View style={styles.rewardItem}>
+            <View style={styles.rewardIconWrap}>
+              <Ionicons name="diamond" size={16} color={Colors.diamondGlow} />
+            </View>
+            <Text style={styles.rewardText}>1分钟 = 1砖石</Text>
+          </View>
+          <View style={styles.rewardDivider} />
+          <View style={styles.rewardItem}>
+            <View style={[styles.rewardIconWrap, { backgroundColor: Colors.goldSoft }]}>
+              <Ionicons name="gift" size={16} color={Colors.goldDark} />
+            </View>
+            <Text style={styles.rewardText}>每25分钟 +10</Text>
+          </View>
+        </Animated.View>
+      </LinearGradient>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.background },
+  container: { flex: 1 },
+  bg: { flex: 1 },
   header: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    paddingHorizontal: 20, paddingVertical: 12,
+    paddingHorizontal: 20, paddingVertical: 14,
   },
   headerTitle: { fontFamily: 'Nunito_800ExtraBold', fontSize: 28, color: Colors.text },
-  todayBadge: {
+  todayPill: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
-    backgroundColor: Colors.primary + '10', borderRadius: 20, paddingHorizontal: 12, paddingVertical: 6,
+    backgroundColor: Colors.goldSoft, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 7,
+    borderWidth: 1, borderColor: Colors.gold + '30',
   },
-  todayText: { fontFamily: 'Nunito_600SemiBold', fontSize: 13, color: Colors.primary },
-  timerContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  circleWrap: { alignItems: 'center', justifyContent: 'center' },
-  timerInner: {
-    position: 'absolute', alignItems: 'center', justifyContent: 'center',
+  todayText: { fontFamily: 'Nunito_600SemiBold', fontSize: 13, color: Colors.goldDark },
+  timerSection: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  circleOuter: { alignItems: 'center', justifyContent: 'center', position: 'relative' },
+  glowRing: {
+    position: 'absolute', width: CIRCLE_SIZE + 40, height: CIRCLE_SIZE + 40, borderRadius: (CIRCLE_SIZE + 40) / 2,
+    backgroundColor: Colors.primary + '08', borderWidth: 2, borderColor: Colors.primary + '10',
   },
-  timerText: { fontFamily: 'RobotoMono_700Bold', fontSize: 48, color: Colors.text },
-  timerSubtext: { fontFamily: 'Nunito_400Regular', fontSize: 14, color: Colors.textSecondary, marginTop: 4 },
-  presetsRow: {
-    flexDirection: 'row', justifyContent: 'center', gap: 10, paddingHorizontal: 20, marginBottom: 24,
+  timerCenter: { position: 'absolute', alignItems: 'center', justifyContent: 'center' },
+  timerDisplay: { fontFamily: 'RobotoMono_700Bold', fontSize: 52, color: Colors.text, letterSpacing: 2 },
+  timerLabel: { fontFamily: 'Nunito_400Regular', fontSize: 14, color: Colors.textSecondary, marginTop: 4 },
+  earningRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 8, backgroundColor: Colors.diamondSoft, borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
+  earningText: { fontFamily: 'RobotoMono_700Bold', fontSize: 14, color: Colors.diamondGlow },
+  presetsRow: { flexDirection: 'row', justifyContent: 'center', gap: 10, paddingHorizontal: 24, marginBottom: 28 },
+  presetCard: {
+    flex: 1, borderRadius: 18, overflow: 'hidden',
+    backgroundColor: '#fff', borderWidth: 1.5, borderColor: Colors.border,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.04, shadowRadius: 4, elevation: 1,
   },
-  presetBtn: {
-    paddingHorizontal: 18, paddingVertical: 10, borderRadius: 20,
-    backgroundColor: Colors.surface, borderWidth: 1, borderColor: Colors.border,
-  },
-  presetBtnActive: {
-    backgroundColor: Colors.primary, borderColor: Colors.primary,
-  },
-  presetText: { fontFamily: 'Nunito_600SemiBold', fontSize: 14, color: Colors.textSecondary },
-  presetTextActive: { color: Colors.textOnPrimary },
-  controlsRow: { alignItems: 'center', marginBottom: 24 },
+  presetCardActive: { borderColor: Colors.primary, borderWidth: 0 },
+  presetGradient: { alignItems: 'center', justifyContent: 'center', paddingVertical: 14, gap: 2 },
+  presetInner: { alignItems: 'center', justifyContent: 'center', paddingVertical: 14, gap: 2 },
+  presetNum: { fontFamily: 'RobotoMono_700Bold', fontSize: 20, color: Colors.textSecondary },
+  presetNumActive: { fontFamily: 'RobotoMono_700Bold', fontSize: 20, color: '#fff' },
+  presetSub: { fontFamily: 'Nunito_400Regular', fontSize: 11, color: Colors.textMuted },
+  presetSubActive: { fontFamily: 'Nunito_400Regular', fontSize: 11, color: 'rgba(255,255,255,0.8)' },
+  controlsSection: { alignItems: 'center', marginBottom: 20 },
   startBtn: {
-    width: 72, height: 72, borderRadius: 36, backgroundColor: Colors.primary,
-    alignItems: 'center', justifyContent: 'center',
-    shadowColor: Colors.primary, shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.4, shadowRadius: 12,
-    elevation: 8,
+    width: 80, height: 80, borderRadius: 40, alignItems: 'center', justifyContent: 'center',
+    shadowColor: Colors.primary, shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.4, shadowRadius: 14, elevation: 8,
   },
-  runningControls: { flexDirection: 'row', gap: 20 },
-  controlBtn: {
-    width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center',
-    elevation: 4,
+  runControls: { flexDirection: 'row', gap: 24, alignItems: 'center' },
+  controlCircle: {
+    width: 60, height: 60, borderRadius: 30, alignItems: 'center', justifyContent: 'center',
+    shadowColor: Colors.primary, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 10, elevation: 5,
   },
-  pauseBtn: { backgroundColor: Colors.gold + '20', borderWidth: 2, borderColor: Colors.gold },
-  resumeBtn: { backgroundColor: Colors.primary },
-  stopBtn: { backgroundColor: Colors.error + '15', borderWidth: 2, borderColor: Colors.error },
-  rewardInfo: {
-    flexDirection: 'row', justifyContent: 'center', gap: 16,
-    paddingHorizontal: 20, paddingBottom: Platform.OS === 'web' ? 94 : 100,
+  pauseCircle: {
+    width: 60, height: 60, borderRadius: 30, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: Colors.primarySoft, borderWidth: 2, borderColor: Colors.primary + '30',
   },
-  rewardCard: {
-    flexDirection: 'row', alignItems: 'center', gap: 8,
-    backgroundColor: Colors.surface, borderRadius: 16, paddingHorizontal: 16, paddingVertical: 10,
+  stopCircle: {
+    width: 52, height: 52, borderRadius: 26, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: Colors.error + '10', borderWidth: 2, borderColor: Colors.error + '25',
+  },
+  rewardBar: {
+    flexDirection: 'row', alignItems: 'center', marginHorizontal: 24,
+    backgroundColor: '#fff', borderRadius: 18, padding: 14,
     borderWidth: 1, borderColor: Colors.border,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.04, shadowRadius: 8, elevation: 1,
   },
-  rewardLabel: { fontFamily: 'Nunito_400Regular', fontSize: 13, color: Colors.textSecondary },
+  rewardItem: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8, justifyContent: 'center' },
+  rewardIconWrap: {
+    width: 30, height: 30, borderRadius: 10, backgroundColor: Colors.diamondSoft,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  rewardText: { fontFamily: 'Nunito_600SemiBold', fontSize: 12, color: Colors.textSecondary },
+  rewardDivider: { width: 1, height: 24, backgroundColor: Colors.border },
 });
